@@ -14,7 +14,15 @@ from email.header import Header
 from email import charset
 
 from flask import Flask
-from flask_mail import Mail, Message, BadHeaderError, sanitize_address, PY3
+from flask_mail import (
+    Mail,
+    Message,
+    BadHeaderError,
+    sanitize_address,
+    whitelist_addresses,
+    validate_domain_whitelist,
+    PY3,
+)
 from speaklater import make_lazy_string
 
 
@@ -626,6 +634,36 @@ class TestConnection(TestCase):
         with self.mail.connect() as conn:
             self.assertRaises(AssertionError, conn.send, msg)
 
+    def test_send_with_whitelist(self):
+        with self.mail_config(domain_whitelist=["@whitelist.example.com"]):
+            with self.mail.connect() as conn:
+                with mock.patch.object(conn, "host") as host:
+                    msg = Message(
+                        subject="testing",
+                        recipients=["to@example.com", "to@whitelist.example.com"],
+                        body="testing",
+                    )
+                    conn.send(msg)
+                    host.sendmail.assert_called_once_with(
+                        u"support@mysite.com",
+                        ["to@whitelist.example.com"],
+                        msg.as_bytes() if PY3 else msg.as_string(),
+                        msg.mail_options,
+                        msg.rcpt_options
+                    )
+
+    def test_send_with_whitelist_no_recipients(self):
+        with self.mail_config(domain_whitelist=["@whitelist.example.com"]):
+            with self.mail.connect() as conn:
+                with mock.patch.object(conn, "host") as host:
+                    msg = Message(
+                        subject="testing",
+                        recipients=["to@example.com"],
+                        body="testing",
+                    )
+                    conn.send(msg)
+                    host.sendmail.assert_not_called()
+
     def test_bad_header_subject(self):
         msg = Message(subject="testing\n\r",
                       body="testing",
@@ -701,3 +739,47 @@ class TestConnection(TestCase):
                     msg.mail_options,
                     msg.rcpt_options
                 )
+
+
+class TestWhitelistDomains(unittest.TestCase):
+    def test_no_empty_whitelist(self):
+        addrs = ["test@example.com", "test2@example.com"]
+        self.assertEqual(whitelist_addresses(addrs, []), addrs)
+
+    def test_no_addresses(self):
+        self.assertEqual(whitelist_addresses([], ["@whitelist.example.com"]), [])
+
+    def test_2tuple_addresses(self):
+        addrs = [
+            ("test", "test@example.com"),
+            ("test1", "test@example.com"),
+            ("test2", "test2@whitelist.example.com"),
+            ("test3", "test3@whitelist.example.com"),
+        ]
+        self.assertEqual(whitelist_addresses(addrs, ["@whitelist.example.com"]), addrs[2:])
+
+    def test_address_only_format(self):
+        addrs = ["test@example.com", "test2@whitelist.example.com"]
+        self.assertEqual(whitelist_addresses(addrs, ["@whitelist.example.com"]), addrs[1:])
+
+    def test_name_address_format(self):
+        addrs = ["test <test@example.com>", "test2 <test2@whitelist.example.com>"]
+        self.assertEqual(whitelist_addresses(addrs, ["@whitelist.example.com"]), addrs[1:])
+
+
+class TestValidateDomainWhitelist(unittest.TestCase):
+    def test_empty_none(self):
+        self.assertEqual(validate_domain_whitelist(None), [])
+
+    def test_empty_list(self):
+        self.assertEqual(validate_domain_whitelist([]), [])
+
+    def test_valid_list(self):
+        domains = ["@example.com", "@test.example.com"]
+        self.assertEqual(validate_domain_whitelist(domains), domains)
+
+    def test_invalid_list(self):
+        with self.assertRaises(ValueError):
+            domains = ["@example.com", "example.com" "@test.example.com"]
+            validate_domain_whitelist(domains)
+
