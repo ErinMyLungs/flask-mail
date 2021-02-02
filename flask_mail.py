@@ -124,6 +124,60 @@ def sanitize_address(addr, encoding='utf-8'):
 def sanitize_addresses(addresses, encoding='utf-8'):
     return map(lambda e: sanitize_address(e, encoding), addresses)
 
+def whitelist_addresses(addresses, domain_whitelist):
+    """Whitelist addresses based on the given list of allowed domains
+
+    Args:
+        addresses (List[Union[str,Tuple[str,str]]]):
+            Recipient/BCC/CC email addresses to check. Expected formats: "to@example.com",
+            "Name <to@example.com>", ("Name", "to@example.com")
+
+        domain_whitelist (List[str]):
+            List of domains to whitelist (e.g. @example.com)
+
+    Returns:
+        (List[Union[str,Tuple[str,str]]]): Recipient/BCC/CC email addresses allowed by whitelist
+    """
+    if not domain_whitelist:  # If whitelist is empty, allow all recipients
+        return addresses
+
+    allowed_addresses = []
+    for original_addr in addresses:
+        # Keep a reference to the original addr value since we want to return the
+        # address in the same format
+        addr = original_addr
+
+        # If address is a string, convert it to 2-tuple format (e.g. (name, email))
+        if isinstance(addr, string_types):
+            addr = parseaddr(force_text(addr))
+        _, addr = addr
+
+        # If address has a whitelisted domain, add it to the allow list
+        if any(addr.endswith(domain) for domain in domain_whitelist):
+            allowed_addresses.append(original_addr)
+
+    return allowed_addresses
+
+def validate_domain_whitelist(domain_whitelist):
+    """Validates domain whitelist
+
+    Each domain in the list must begin with "@".
+
+    Args:
+        domain_whitelist (Optional[List[str]]): List of domains to whitelist (e.g. @example.com)
+
+    Returns:
+        (List[str]): List of domains to whitelist (e.g. @example.com)
+
+    Raises:
+        (ValueError): Occurs when a domain is not prefixed with "@"
+    """
+    if not domain_whitelist:
+        return []
+    for domain in domain_whitelist:
+        if not domain.startswith("@"):
+            raise ValueError("'{}' does not start with '@'".format(domain))
+    return domain_whitelist
 
 def _has_newline(line):
     """Used by has_bad_header to check for \\r or \\n"""
@@ -175,6 +229,9 @@ class Connection(object):
         :param envelope_from: Email address to be used in MAIL FROM command.
         """
         assert message.send_to, "No recipients have been added"
+        whitelisted_send_to = whitelist_addresses(message.send_to, self.mail.domain_whitelist)
+        if not whitelisted_send_to:  # If no emails were whitelisted, don't send message
+            return
 
         assert message.sender, (
                 "The message does not specify a sender and a default sender "
@@ -188,7 +245,7 @@ class Connection(object):
 
         if self.host:
             self.host.sendmail(sanitize_address(envelope_from or message.sender),
-                               list(sanitize_addresses(message.send_to)),
+                               list(sanitize_addresses(whitelisted_send_to)),
                                message.as_bytes() if PY3 else message.as_string(),
                                message.mail_options,
                                message.rcpt_options)
@@ -531,7 +588,8 @@ class _Mail(_MailMixin):
     def __init__(self, server, username, password, port, use_tls, use_ssl,
                  default_sender, debug, max_emails, suppress,
                  ascii_attachments=False,
-                 timeout=smtplib.socket._GLOBAL_DEFAULT_TIMEOUT):
+                 timeout=smtplib.socket._GLOBAL_DEFAULT_TIMEOUT,
+                 domain_whitelist=None):
         self.server = server
         self.username = username
         self.password = password
@@ -544,7 +602,7 @@ class _Mail(_MailMixin):
         self.suppress = suppress
         self.ascii_attachments = ascii_attachments
         self.timeout = timeout
-
+        self.domain_whitelist = validate_domain_whitelist(domain_whitelist)
 
 class Mail(_MailMixin):
     """Manages email messaging
@@ -572,7 +630,8 @@ class Mail(_MailMixin):
             config.get('MAIL_MAX_EMAILS'),
             config.get('MAIL_SUPPRESS_SEND', testing),
             config.get('MAIL_ASCII_ATTACHMENTS', False),
-            config.get('MAIL_TIMEOUT', smtplib.socket._GLOBAL_DEFAULT_TIMEOUT)
+            config.get('MAIL_TIMEOUT', smtplib.socket._GLOBAL_DEFAULT_TIMEOUT),
+            config.get('MAIL_DOMAIN_WHITELIST', []),
         )
 
     def init_app(self, app):
